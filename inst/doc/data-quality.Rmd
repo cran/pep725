@@ -1,0 +1,660 @@
+---
+title: "Data Quality Assessment"
+author:
+  - Matthias Templ^[University of Applied Sciences Northwestern Switzerland (FHNW)]
+  - Barbara Templ^[Swiss Federal Institute for Forest, Snow and Landscape Research (WSL)]
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+bibliography: references.bib
+vignette: >
+  %\VignetteIndexEntry{Data Quality Assessment}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+*Vignette 2 of 4 for the **pep725** R package.
+The most current version is available on
+[GitHub](https://github.com/matthias-da/pep725) and
+[CRAN](https://CRAN.R-project.org/package=pep725).*
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+## Introduction
+
+Data quality assessment is a critical but often overlooked step in phenological
+analysis. Before calculating trends, normals, or climate sensitivities, you need
+to understand what's in your data and make informed decisions about unusual
+observations.
+
+### The Data Quality Challenge
+
+Long-term phenological datasets such as PEP725 are compiled from many observers over decades. This richness enables large-scale analyses, but it also introduces data quality challenges that need to be assessed:
+
+| Issue Type | Examples | Consequence if Ignored |
+|------------|----------|------------------------|
+| **Recording errors** | Typographical errors (DOY 150 instead of 105), incorrect year | Outliers bias statistics |
+| **Identification errors** | Confusion between morphologically similar species | Inconsistent or mixed time series |
+| **Protocol changes** | Changes in the definition of phenological phases over time | Artificial shifts or trends |
+| **Biological anomalies** | Irregular phenological events as a result of climate extremes | May represent real biological signals |
+
+The following sections introduce practical tools in pep725 package for diagnosing and handling these issues in a transparent and reproducible way.
+
+### What You'll Learn
+
+| Section | Topic | Key Functions |
+|---------|-------|---------------|
+| Part 1 | Detecting statistical outliers | `pep_flag_outliers()`, `pep_plot_outliers()` |
+| Part 2 | Temporal coverage and completeness | `pep_completeness()` |
+| Part 3 | Phase presence validation | `pep_check_phases()` |
+| Part 4 | Integrated workflow | Combining all approaches |
+
+### Prerequisites
+
+This vignette assumes you are familiar with:
+
+- Basic phenological concepts (from "Getting Started" vignette)
+- Day of Year (DOY) as a timing metric
+- BBCH phenological phase codes
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(pep725)
+library(data.table)
+
+# Download the synthetic dataset
+pep <- pep_download()
+
+# For this vignette, we'll focus on flowering phases
+flowering <- pep[phase_id %in% c(60, 65)]
+cat("Flowering observations:", nrow(flowering), "\n")
+cat("Species:", length(unique(flowering$species)), "\n")
+cat("Year range:", min(flowering$year), "-", max(flowering$year), "\n")
+```
+
+---
+
+# Part 1: Outlier Detection
+
+## Why Detect Outliers?
+
+An **outlier** is an observation that differs substantially from the expected
+pattern. In phenological data, outliers may indicate:
+
+1. **Recording errors** that should be excluded from analysis
+   - A typo: DOY 250 instead of DOY 150 (roughly 3 months difference)
+   - Wrong year entered: observation assigned to incorrect season
+
+2. **Unusual weather events** worth investigating
+   - Very warm winter causing early flowering
+   - Late frost delaying spring phenology
+
+3. **Second flowering** or other abnormal phenological events
+   - Plants flowering again in autumn/winter after spring flowering
+   - Increasingly observed with climate change
+
+**The challenge**: You can't simply delete all outliers. Some are errors, but
+others are scientifically valuable observations of unusual events.
+
+## Statistical Methods for Outlier Detection
+
+The `pep_flag_outliers()` function provides four statistical methods for identifying
+potential outliers. Each method has different assumptions and strengths:
+
+### Method 1: 30-Day Rule (Simple Threshold)
+
+The simplest approach: flag any observation more than 30 days from the median
+for that species/phase combination.
+
+```{r flag-basic}
+# Flag outliers using the default 30-day rule
+outliers <- pep_flag_outliers(
+  pep = flowering,
+  method = "30day",
+  by = c("species", "phase_id")
+)
+
+print(outliers)
+```
+
+**How it works:**
+
+```
+                     Distribution of flowering dates
+
+        ← Early                                    Late →
+
+   ----|----[=======|=======]----|-----
+        ^           ^           ^
+     -30 days    median      +30 days
+
+   Anything outside the brackets is flagged as an outlier
+```
+
+### Understanding the Output
+
+The function adds new columns to your original data:
+
+| Column | What It Contains | How to Use It |
+|--------|------------------|---------------|
+| `is_outlier` | TRUE/FALSE flag | Filter data: `data[is_outlier == FALSE]` |
+| `deviation` | Days from expected | Prioritize investigation: larger = more extreme |
+| `expected_doy` | Reference DOY (median) | Understand what "normal" looks like |
+
+### Method 2: MAD (Median Absolute Deviation) - Recommended
+
+The MAD method is **robust to the presence of multiple outliers**. This is
+important because if your data contains many outliers, they can distort
+mean-based methods.
+
+```{r flag-methods, eval=FALSE}
+# MAD method: flag if > 3 MAD from median (robust)
+outliers_mad <- pep_flag_outliers(flowering, method = "mad", threshold = 3)
+```
+
+**Why MAD is recommended:**
+
+| Scenario | Mean-based method | MAD method |
+|----------|-------------------|------------|
+| 1-2 outliers | Works reasonably | Works well |
+| Many outliers | Outliers inflate SD, may miss more | Stays robust |
+| Asymmetric data | Assumes symmetry | Handles asymmetry |
+
+### Method 3: IQR (Interquartile Range) - Also Robust
+
+The IQR method uses quartiles and is familiar from boxplot "whiskers":
+
+```{r iqr-method, eval=FALSE}
+# IQR method: flag if outside 1.5 * IQR (standard boxplot rule)
+outliers_iqr <- pep_flag_outliers(flowering, method = "iqr", threshold = 1.5)
+```
+
+**How it works:**
+- Q1 = 25th percentile, Q3 = 75th percentile
+- IQR = Q3 - Q1
+- Outlier if: value < Q1 - 1.5×IQR OR value > Q3 + 1.5×IQR
+
+### Method 4: Z-Score - Sensitive but Less Robust
+
+The z-score method assumes normally distributed data:
+
+```{r zscore-method, eval=FALSE}
+# Z-score method: flag if |z| > 3 (assumes normal distribution)
+outliers_zscore <- pep_flag_outliers(flowering, method = "zscore", threshold = 3)
+```
+
+**Caution**: The z-score method is sensitive to existing outliers. If your data
+has many outliers, they will inflate the standard deviation, making the z-score
+threshold less effective at detecting them.
+
+### Choosing a Method
+
+| Method | Best For | Threshold Meaning |
+|--------|----------|-------------------|
+| `30day` | Simple, interpretable threshold | Absolute days from median |
+| `mad` | Most situations (recommended) | Number of MADs from median |
+| `iqr` | Familiar boxplot-style detection | IQR multiplier |
+| `zscore` | Clean data, normal distribution | Standard deviations |
+
+### Summary Statistics
+
+```{r flag-summary}
+summary(outliers)
+```
+
+### Comparing Outlier Rates Across Species
+
+Different species may have different outlier rates due to observation difficulty
+or data quality:
+
+```{r flag-compare}
+# Check outliers for grapevine
+vine_flowering <- pep[species == "Vitis vinifera" & phase_id %in% c(60, 65)]
+
+if (nrow(vine_flowering) > 0) {
+  outliers_vine <- pep_flag_outliers(
+    pep = vine_flowering,
+    method = "30day",
+    by = c("species", "phase_id")
+  )
+
+  cat("Outlier comparison:\n")
+  cat("All flowering species: ", round(100 * mean(outliers$is_outlier), 2), "%\n")
+  cat("Grapevine only:        ", round(100 * mean(outliers_vine$is_outlier), 2), "%\n")
+} else {
+  cat("No grapevine flowering data available for comparison.\n")
+}
+```
+
+## Visualizing Outliers
+
+Visual inspection is essential for understanding outlier patterns. The
+`pep_plot_outliers()` function provides four visualization types:
+
+### 1. Overview Plot
+
+Shows the big picture: how many outliers, which species/phases are affected:
+
+```{r plot-overview, fig.height=6}
+# Overview of outlier patterns
+pep_plot_outliers(outliers, type = "overview")
+```
+
+**What to look for:**
+- Which species have the most outliers? (Might indicate data quality issues)
+- Are outliers concentrated in certain phases? (Might indicate definition problems)
+- What's the overall outlier rate? (Typical: 1-5% for well-curated data)
+
+### 2. Seasonal Distribution
+
+When in the year do outliers occur?
+
+```{r plot-seasonal, fig.height=5}
+# When do outliers occur in the year?
+pep_plot_outliers(outliers, type = "seasonal")
+```
+
+**Interpretation guide:**
+
+| Outlier Timing | Likely Explanation |
+|----------------|-------------------|
+| Very early (DOY < 50) | Possible data errors (flowering in January/February unlikely for most species) |
+| Somewhat early | Warm winters or Mediterranean locations |
+| Somewhat late | Cool springs or high-altitude stations |
+| Very late (DOY > 250) | Possible **second flowering** events - investigate! |
+
+### 3. Detailed Context
+
+See outliers alongside normal observations:
+
+```{r plot-detail, fig.height=5}
+# See outliers in context of all observations
+pep_plot_outliers(outliers, type = "detail", n_top = 15)
+```
+
+**This plot shows:**
+- Full distribution of observations (gray)
+- Flagged outliers (highlighted)
+- The `n_top` parameter controls how many species/phases to show
+
+### 4. Geographic Distribution
+
+Where are outliers located?
+
+```{r plot-map, fig.height=5}
+# Where are outliers located?
+pep_plot_outliers(outliers, type = "map")
+```
+
+**What to look for:**
+- Clustered outliers in one region? Might indicate local data quality issues
+- Outliers at network edges? Might be at environmental limits
+- Random scatter? Suggests individual observation errors
+
+---
+
+# Part 2: Data Completeness
+
+## Why Check Completeness?
+
+**Data completeness** refers to how many years of observations exist for each
+station/phase combination. This matters because:
+
+1. **Trend analysis requires continuous data**: Gaps can bias trend estimates
+2. **Normals require representative coverage**: WMO recommends 24+ years in a 30-year period
+3. **Missing data isn't random**: Stations often drop out or are added systematically
+
+### Visualizing Completeness Issues
+
+```
+Station A: ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●  <- 100% complete
+           1990                      2020
+
+Station B: ●●●●●●●●●●○○○○○○○○○○●●●●●●●●●●  <- Gap in middle
+           1990                      2020
+
+Station C: ○○○○○○○○○○○○○○○○○○○○●●●●●●●●●●  <- Only recent data
+           1990                      2020
+
+Station D: ●●●●●●●●●●●●●●●●●●●●○○○○○○○○○○  <- Discontinued
+           1990                      2020
+```
+
+Different completeness patterns have different implications:
+
+| Pattern | Implications for Analysis |
+|---------|---------------------------|
+| Full coverage | Ideal - reliable trends and normals |
+| Gap in middle | Careful - may miss important changes |
+| Only recent | Cannot compare to historical period |
+| Discontinued | Cannot assess recent changes |
+
+## Assessing Completeness
+
+```{r completeness-basic}
+# Check completeness by station and phase
+# Use year_range to focus on a specific period
+completeness <- pep_completeness(
+  pep = flowering,
+  by = c("s_id", "phase_id"),
+  year_range = c(1990, 2020)
+)
+
+print(completeness)
+```
+
+### Understanding Completeness Metrics
+
+The function calculates several metrics:
+
+| Metric | What It Measures | Interpretation |
+|--------|------------------|----------------|
+| `n_years` | Total years with data | More = better |
+| `completeness_pct` | % of year span covered | 70%+ for trends, 80%+ for normals |
+| `year_span` | Total span (year_max - year_min + 1) | Context for completeness |
+| `year_min` | Earliest observation | Needed for historical comparison |
+| `year_max` | Most recent observation | Needed for current status |
+
+### Summary Statistics
+
+```{r completeness-summary}
+summary(completeness)
+```
+
+## Filtering by Completeness
+
+Use completeness information to select stations appropriate for your analysis:
+
+```{r completeness-filter}
+# Get stations with good coverage (>= 70%)
+good_coverage <- completeness[completeness_pct >= 70]
+cat("Stations with >= 70% coverage:", nrow(good_coverage), "\n")
+
+# Use these for trend analysis
+good_stations <- unique(good_coverage$s_id)
+flowering_complete <- flowering[s_id %in% good_stations]
+cat("Observations from complete stations:", nrow(flowering_complete), "\n")
+```
+
+### Completeness Thresholds for Different Analyses
+
+| Analysis Type | Minimum Completeness | Reasoning |
+|---------------|----------------------|-----------|
+| Trend detection | 50% (15+ years) | Need enough points for trend fitting |
+| Climate sensitivity | 60% | Need variability across climate conditions |
+| 30-year normals | 80% (24+ years) | WMO standard requirement |
+| Station comparison | Same time period | Avoid bias from different eras |
+
+## Visualizing Completeness
+
+```{r completeness-plot, fig.height=5}
+plot(completeness)
+```
+
+---
+
+# Part 3: Phase Presence Validation
+
+## Why Check Phase Presence?
+
+Before starting an analysis, it's important to verify that your data contains
+the phenological phases you need. The `pep_check_phases()` function validates that
+expected BBCH phase codes are present in your data.
+
+**Common questions this helps answer:**
+
+- Does my dataset have flowering observations (phase 60)?
+- Are flowering and fruit maturity phases both available for apple?
+- Which phases are missing for my species of interest?
+
+## Checking Phase Presence
+
+```{r check-basic}
+# Check if expected phases are present for apple
+apple <- pep[species == "Malus domestica"]
+
+phase_check <- pep_check_phases(
+  pep = apple,
+  expected = c(60, 65, 87)  # flowering, full flowering, fruit maturity
+)
+
+print(phase_check)
+```
+
+### Understanding the Output
+
+The function returns information about phase coverage:
+
+| Output | What It Shows |
+|--------|---------------|
+| `expected` | The phases you asked for |
+| `present` | Which expected phases were found |
+| `missing` | Which expected phases are absent |
+| `complete` | TRUE if all expected phases are present |
+| `n_obs` | Number of observations per phase |
+
+## Checking Multiple Species
+
+To check phase presence across multiple species at once:
+
+```{r check-multi}
+# Check phases for multiple species
+multi_check <- pep_check_phases_multi(
+  pep = pep,
+  species_list = c("Malus domestica", "Vitis vinifera"),
+  expected = c(60, 65, 87)
+)
+
+print(multi_check)
+```
+
+### Common Phases to Check
+
+| Plant Type | Common Phases | BBCH Codes |
+|------------|---------------|------------|
+| Cereals | Heading, Flowering, Harvest | 60, 65, 100 |
+| Fruit trees | Flowering, Full flowering, Fruit maturity | 60, 65, 87 |
+| Deciduous trees | Leaf unfolding, Flowering, Leaf fall | 11, 60, 95 |
+
+---
+
+# Part 4: Integrated Quality Workflow
+
+## Putting It All Together
+
+Here's a recommended workflow for data quality assessment that combines all the
+tools covered in this vignette:
+
+```{r workflow}
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1: Assess temporal completeness
+# ══════════════════════════════════════════════════════════════════════════════
+# Why: Incomplete stations can bias trend estimates and normals
+
+completeness <- pep_completeness(flowering, by = c("s_id", "phase_id"))
+good_stations <- completeness[completeness_pct >= 50, s_id]
+fl_filtered <- flowering[s_id %in% good_stations]
+
+cat("Kept", length(good_stations), "stations with >= 50% completeness\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2: Flag statistical outliers
+# ══════════════════════════════════════════════════════════════════════════════
+# Why: Identify observations that deviate from expected patterns
+
+outliers_wf <- pep_flag_outliers(fl_filtered, method = "mad", threshold = 3)
+
+cat("Flagged", sum(outliers_wf$is_outlier), "outliers",
+    "(", round(100 * mean(outliers_wf$is_outlier), 1), "% )\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Make informed decisions about exclusion
+# ══════════════════════════════════════════════════════════════════════════════
+# Key principle: Document your decisions!
+
+# Option A: Strict cleaning (for normals calculation)
+fl_strict <- outliers_wf[is_outlier == FALSE]
+
+# Option B: Moderate cleaning (keep moderate outliers)
+fl_moderate <- outliers_wf[is_outlier == FALSE | abs(deviation) < 60]
+
+cat("Strict cleaning keeps:", nrow(fl_strict), "obs\n")
+cat("Moderate cleaning keeps:", nrow(fl_moderate), "obs\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4: Proceed with analysis on cleaned data
+# ══════════════════════════════════════════════════════════════════════════════
+
+normals <- pheno_normals(fl_moderate, period = 1991:2020, min_years = 5)
+cat("Normals calculated for", sum(!is.na(normals$mean_doy)), "groups\n")
+```
+
+## Documentation Template
+
+When publishing research, document your quality control decisions:
+
+```
+Data Quality Control:
+1. Completeness filtering: Excluded stations with < 50% temporal coverage
+   (reduced dataset from N to M stations)
+
+2. Outlier detection: Used MAD method with threshold = 3
+   (flagged X observations as outliers, Y% of total)
+
+3. Outlier disposition:
+   - Excluded: Z observations with deviations > 60 days (likely errors)
+   - Retained: W observations identified as abnormal events (e.g., second flowering)
+
+4. Phase validation: Checked for sequence violations in [species list]
+   (identified V cases for manual review)
+```
+
+---
+
+# Best Practices Summary
+
+## For Outlier Detection
+
+1. **Use robust methods**: MAD or IQR methods handle multiple outliers better
+   than z-scores. The MAD method is generally recommended.
+
+2. **Check seasonally**: Late-season outliers (DOY > 250) may be biologically
+   meaningful events (e.g. second flowering) rather than errors.
+
+3. **Verify extremes**: For observations with very large deviations (> 60 days),
+   try to check original data sources or contact data providers.
+
+4. **Document decisions**: Record which outliers you exclude and why. This is
+   essential for reproducibility and peer review.
+
+5. **Don't delete automatically**: Human judgment is needed to distinguish
+   errors from genuine unusual events.
+
+## For Abnormal Event Detection
+
+1. **Consider species biology**: Some species (e.g., certain Rosaceae) are more
+   prone to second flowering than others.
+
+2. **Check geographic patterns**: If multiple nearby stations report late events
+   in the same year, this suggests a real regional phenomenon.
+
+3. **Look at weather context**: Link abnormal events to weather extremes -
+   drought is a common trigger.
+
+4. **Distinguish from errors**: Very isolated observations (single station,
+   single year) need verification before treating them as e.g. second flowering.
+
+5. **Keep for separate analysis**: Abnormal phenological events are scientifically
+   interesting (proof of climate change) - don't just delete them!
+
+## For Completeness Assessment
+
+1. **Set appropriate thresholds**: Use 80%+ coverage for calculating normals,
+   50%+ for trend analysis.
+
+2. **Consider gap patterns**: Many small gaps are usually better than one long
+   gap that might coincide with important climate changes.
+
+3. **Check temporal bias**: Ensure you're not comparing stations with data only
+   from early periods to stations with only recent data.
+
+4. **Document station selection**: Report how many stations met your completeness
+   criteria and how this affected your sample.
+
+## For Phase Presence Checking
+
+1. **Check early**: Run `pep_check_phases()` at the start of your analysis to
+   verify required phases are available in your data.
+
+2. **Know required phases**: Different analyses need different phases -
+   know which BBCH codes you need before starting.
+
+3. **Check across species**: Use `pep_check_phases_multi()` to verify data
+   availability for all species you plan to analyze.
+
+---
+
+## Summary
+
+This vignette covered data quality tools for phenological analysis:
+
+| Function | Purpose | Key Output |
+|----------|---------|------------|
+| `pep_flag_outliers()` | Identify unusual observations | `is_outlier` flag, `deviation` in days |
+| `pep_plot_outliers()` | Visualize outlier patterns | Four plot types: overview, seasonal, detail, map |
+| `pep_completeness()` | Assess temporal coverage | Completeness %, gaps, year range |
+| `pep_check_phases()` | Check phase presence | Missing phases, observation counts |
+
+### Key Take-Home Messages
+
+1. **Data quality assessment is not optional** - it's a critical step that
+   affects the validity of all downstream analyses.
+
+2. **Not all outliers are errors** - some represent genuine biological phenomena
+   like second flowering that deserve further study.
+
+3. **Document your decisions** - quality control choices should be transparent
+   and reproducible.
+
+4. **Use robust methods** - the MAD method is recommended for phenological data
+   because it handles multiple outliers well.
+
+5. **Visual inspection matters** - plots often reveal patterns that summary
+   statistics miss.
+
+## Next Steps
+
+Explore the other vignettes for complementary analyses:
+
+- **Getting Started**: Data access, the `pep` class, and basic exploration
+
+```{r eval = FALSE}
+vignette("getting-started", package = "pep725")
+```
+
+- **Phenological Analysis**: Normals, anomalies, quality grading, and trends
+
+```{r eval = FALSE}
+vignette("phenological-analysis", package = "pep725")
+```
+
+- **Spatial Phenological Patterns**: Gradients, synchrony, and mapping
+
+```{r eval = FALSE}
+vignette("spatial-patterns", package = "pep725")
+```
+
+---
+
+## Session Info
+
+```{r session}
+sessionInfo()
+```

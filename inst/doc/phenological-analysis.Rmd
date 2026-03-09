@@ -1,0 +1,825 @@
+---
+title: "Phenological Analysis"
+author:
+  - Matthias Templ^[University of Applied Sciences Northwestern Switzerland (FHNW)]
+  - Barbara Templ^[Swiss Federal Institute for Forest, Snow and Landscape Research (WSL)]
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+bibliography: references.bib
+vignette: >
+  %\VignetteIndexEntry{Phenological Analysis}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+*Vignette 3 of 4 for the **pep725** R package.
+The most current version is available on
+[GitHub](https://github.com/matthias-da/pep725) and
+[CRAN](https://CRAN.R-project.org/package=pep725).*
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+## Introduction
+
+This vignette teaches you how to perform core phenological analyses using the
+**pep725** package. By the end, you'll be able to:
+
+1. Calculate **phenological normals** (long-term baselines)
+2. Detect **anomalies** (years that deviate from normal)
+3. Assess **data quality** before analysis
+4. Analyze and visualize **trends** over time
+5. Link phenology to **climate variables**
+
+These analyses form the foundation of phenological research, whether you're
+studying climate change impacts, agricultural timing, or ecosystem dynamics.
+
+### What You'll Learn
+
+| Analysis | What It Tells You | Key Function |
+|----------|-------------------|--------------|
+| Normals | "What is typical?" | `pheno_normals()` |
+| Anomalies | "Which years are unusual?" | `pheno_anomaly()` |
+| Quality | "Can I trust this data?" | `pep_quality()` |
+| Trends | "Is timing changing?" | `pheno_trend_turning()` |
+| Climate links | "Why is it changing?" | `pheno_regional()` |
+
+### Prerequisites
+
+This vignette assumes you've read the **Getting Started** vignette and
+understand:
+
+- How to load phenological data
+- The structure of the `pep` object
+- Basic BBCH codes and DOY (day of year)
+
+## Setup
+
+Let's load the package and prepare our data:
+
+```{r setup, message=FALSE, warning=FALSE}
+library(pep725)
+
+# Download the synthetic dataset
+pep <- pep_download()
+
+# For this vignette, we'll focus on two well-represented species:
+# 1. Apple (Malus domestica) - excellent coverage across Europe
+# 2. Grapevine (Vitis vinifera) - longest historical records
+
+apple <- pep[species == "Malus domestica"]
+vine <- pep[species == "Vitis vinifera"]
+
+# Verify subsets contain data
+stopifnot(nrow(apple) > 0, nrow(vine) > 0)
+
+# Quick overview of our data
+cat("=== Apple (Malus domestica) ===\n")
+cat("Observations:", nrow(apple), "\n")
+cat("Year range:", min(apple$year), "-", max(apple$year), "\n")
+cat("Stations:", length(unique(apple$s_id)), "\n\n")
+
+cat("=== Grapevine (Vitis vinifera) ===\n")
+cat("Observations:", nrow(vine), "\n")
+cat("Year range:", min(vine$year), "-", max(vine$year), "\n")
+cat("Stations:", length(unique(vine$s_id)), "\n")
+```
+
+**Why these species?**
+- *Malus domestica* (apple) has excellent coverage across Europe with clear
+  phenological phases (bud burst, flowering, fruit development)
+- *Vitis vinifera* (grapevine) has the longest historical records (back to 1775)
+  and is economically important for wine production
+
+## Part 1: Phenological Normals
+
+### What are Phenological Normals?
+
+In climatology, "climate normals" are defined as 30-year averages of temperature
+or precipitation used to characterise typical climatic conditions.
+By analogy, we propose the term **phenological normals** to describe long-term
+averages of the timing of recurring biological events.
+
+**Why are normals important?**
+
+1. **Baseline for comparison**: Describing an event as “early” or “late” is only meaningful relative to when it typically occurs.
+2. **Detecting change**: Comparing normals from different reference periods (e.g.,
+   1961-1990 vs. 1991-2020) highlights long-term shifts in phenological timing
+3. **Spatial patterns**: Normals vary across regions, reflecting differences in climate, latitude and elevation
+4. **Model validation**: Phenological models predict normals; observations
+   validate them
+
+### Standard Reference Periods
+
+The World Meteorological Organization (WMO) defines standard 30-year periods
+for calculating normals:
+
+| Period | Use Case |
+|--------|----------|
+| **1961-1990** | Historical baseline, often used as "pre-warming" reference |
+| **1991-2020** | Current WMO standard normal period |
+| **Custom** | Any period relevant to your research question |
+
+**Important**: The period you choose affects your conclusions! If you compare
+2023 to a 1961-1990 baseline, you might find larger anomalies than comparing
+to a 1991-2020 baseline (because the recent period already includes warming).
+
+### Calculating Normals with pheno_normals()
+
+Let's calculate normals for apple:
+
+```{r normals-basic}
+# Calculate normals for apple across countries and phases
+# Using 1990-2015 for illustration (ensures enough data in synthetic dataset)
+normals <- pheno_normals(
+  pep = apple,
+  period = 1990:2015,
+  by = c("country", "phase_id"),
+  min_years = 10
+)
+
+print(normals)
+```
+
+**Understanding the parameters:**
+
+| Parameter | What it does | Our choice |
+|-----------|--------------|------------|
+| `pep` | Input data | Apple observations |
+| `period` | Years to include in normal | 1990-2015 (26 years) |
+| `by` | Grouping variables | Country and phase (separate normals for each) |
+| `min_years` | Minimum years required | 10 (groups with fewer years get NA) |
+
+### Understanding the Output Statistics
+
+The function returns several statistics for each group. Here's what these mean
+and when to use each:
+
+| Statistic | Description | When to Use |
+|-----------|-------------|-------------|
+| `n_years` | Years with data | Check data availability |
+| `mean_doy` | Arithmetic mean DOY | Standard measure, but sensitive to outliers |
+| `median_doy` | Middle value | **Recommended** - robust to outliers |
+| `sd_doy` | Standard deviation | Describes year-to-year variability |
+| `iqr_doy` | Interquartile range | Robust measure of spread |
+| `mad_doy` | Median absolute deviation | Most robust spread measure |
+| `q05`-`q95` | Percentiles | Define "early" (q05) and "late" (q95) thresholds |
+
+**Which measure should you use?**
+
+- For **central tendency**: Use `median_doy` (robust to outliers)
+- For **variability**: Use `mad_doy` or `iqr_doy` (robust)
+- For **defining extreme events**: Use percentiles (e.g., q05, q95)
+
+```{r normals-summary}
+# Get a summary of the normals
+summary(normals)
+```
+
+### Visualizing Normals
+
+The `plot()` method shows the median DOY with interquartile range (Q25-Q75) for
+each group:
+
+```{r normals-plot, fig.width=7, fig.height=5}
+plot(normals)
+```
+
+A bar chart variant is also available with `plot(normals, which = "bar")`.
+
+### Filtering to Specific Phases
+
+Often you want normals for a specific phenological phase:
+
+```{r normals-filtered}
+# Normals for apple first flowering (BBCH 60) only
+flowering_normals <- pheno_normals(
+  pep = pep,                          # Can use full dataset
+  period = 1990:2015,
+  species = "Malus domestica",         # Filter by species
+  phase_id = 60,                      # Filter by phase (first flowers)
+  by = "country",                     # Group only by country
+  min_years = 5                       # Lower threshold for more countries
+)
+
+print(flowering_normals)
+```
+
+**Note on NA values:** You'll notice some countries show `NA` for all
+statistics. This happens when a country has fewer than `min_years` years of
+data. This is intentional - calculating a "normal" from just 2-3 years would
+be misleading.
+
+The print output tells you "Groups with valid normals: X / Y" so you know
+how many groups had sufficient data.
+
+### Comparing Two Time Periods
+
+A powerful application is comparing normals between periods to detect shifts:
+
+```{r normals-compare, warning=FALSE, message=FALSE}
+# Calculate normals for two periods
+# Period 1: Historical (1961-1990)
+period1 <- pheno_normals(
+  pep,
+  period = 1961:1990,
+  species = "Malus",
+  phase_id = 60,
+  by = "country",
+  min_years = 10
+)
+
+# Period 2: Recent (1991-2020)
+period2 <- pheno_normals(
+  pep,
+  period = 1991:2020,
+  species = "Malus",
+  phase_id = 60,
+  by = "country",
+  min_years = 10
+)
+
+# Compare the two periods by merging on country
+# Negative shift = flowering got earlier
+# Positive shift = flowering got later
+if (nrow(period1) > 0 && nrow(period2) > 0) {
+  comparison <- merge(
+    period1[, .(country, mean_doy_early = mean_doy)],
+    period2[, .(country, mean_doy_recent = mean_doy)],
+    by = "country"
+  )
+  comparison[, shift := mean_doy_recent - mean_doy_early]
+
+  cat("Countries compared:", nrow(comparison), "\n")
+  cat("Mean shift:", round(mean(comparison$shift, na.rm = TRUE), 1), "days\n")
+  cat("Range of shifts:", round(min(comparison$shift, na.rm = TRUE), 1), "to",
+      round(max(comparison$shift, na.rm = TRUE), 1), "days\n")
+
+  if (mean(comparison$shift, na.rm = TRUE) < 0) {
+    cat("\nInterpretation: On average, flowering has shifted EARLIER\n")
+  } else {
+    cat("\nInterpretation: On average, flowering has shifted LATER\n")
+  }
+}
+```
+
+**Ecological interpretation**: A shift of -5 days (earlier) over 30 years
+corresponds to about 1.7 days per decade.
+
+### Comparing Species: Grapevine with Longer History
+
+Grapevine records extend much further back, enabling comparison across longer
+time periods:
+
+```{r normals-vine, warning=FALSE, message=FALSE}
+# Calculate normals for grapevine flowering
+vine_normals <- pheno_normals(
+  pep = vine,
+  period = 1990:2015,
+  phase_id = 65,  # Full flowering
+  by = "country",
+  min_years = 5
+)
+
+# Compare with apple for countries that have both
+if (nrow(vine_normals) > 0) {
+  cat("Grapevine flowering normals (BBCH 65):\n")
+  print(vine_normals[!is.na(mean_doy), .(country, n_years, mean_doy, sd_doy)])
+}
+```
+
+## Part 2: Phenological Anomalies
+
+### What are Anomalies?
+
+An **anomaly** is the deviation of a single year from the long-term normal.
+Anomalies help you:
+
+1. **Identify extreme years**: Which years had unusually early or late phenology?
+2. **Link to climate**: Do years with early phenology correspond to warm springs?
+3. **Assess trends**: Are anomalies becoming more frequent or extreme?
+
+### How Anomalies are Calculated
+
+For each year, the anomaly is calculated as:
+
+```
+Anomaly = Observed DOY - Normal DOY
+```
+
+- **Negative anomaly** = Earlier than normal
+- **Positive anomaly** = Later than normal
+
+The anomaly can be expressed in:
+
+- **Days**: Direct difference (e.g., "10 days early")
+- **Z-score**: Standardized by variability (e.g., "2 standard deviations early")
+- **Percentile**: Position in historical distribution (e.g., "5th percentile")
+
+### Calculating Anomalies with pheno_anomaly()
+
+```{r anomalies-basic}
+# Calculate anomalies for apple
+# Using 1990-2010 as baseline period
+anomalies <- pheno_anomaly(
+  pep = apple,
+  baseline_period = 1990:2010,
+  by = c("country", "phase_id"),
+  min_years = 5
+)
+
+print(anomalies)
+```
+
+### Understanding Anomaly Metrics
+
+The function returns several ways to express the anomaly:
+
+| Metric | Description | Interpretation |
+|--------|-------------|----------------|
+| `anomaly_days` | Difference in days | Negative = early, positive = late |
+| `z_score` | Standardized anomaly | \|z\| > 2 is unusual, > 3 is extreme |
+| `percentile` | Position in distribution | <10 very early, >90 very late |
+| `is_extreme` | Boolean flag | TRUE if outside normal range |
+| `direction` | Text label | "early", "late", or "normal" |
+
+**Which metric to use?**
+
+- **For communication**: Use `anomaly_days` ("flowering was 10 days early")
+- **For statistics**: Use `z_score` (allows comparison across regions/phases)
+- **For frequency analysis**: Use `percentile` ("a 1-in-20 year event")
+
+### Identifying Extreme Years
+
+Let's find the most extreme years in our data:
+
+```{r anomalies-extreme}
+# Find extreme years (is_extreme == TRUE)
+extreme <- anomalies[is_extreme == TRUE]
+
+if (nrow(extreme) > 0) {
+  cat("Total extreme years found:", nrow(extreme), "\n\n")
+
+  # Show the most extreme early years
+  cat("Most extreme EARLY years:\n")
+  early <- extreme[direction == "early"][order(anomaly_days)]
+  if (nrow(early) > 0) {
+    print(early[1:min(5, nrow(early)),
+          .(country, phase_id, year, anomaly_days, z_score)])
+  }
+
+  # Show the most extreme late years
+  cat("\nMost extreme LATE years:\n")
+  late <- extreme[direction == "late"][order(-anomaly_days)]
+  if (nrow(late) > 0) {
+    print(late[1:min(5, nrow(late)),
+          .(country, phase_id, year, anomaly_days, z_score)])
+  }
+} else {
+  cat("No extreme years detected in this dataset\n")
+}
+```
+
+**What makes a year "extreme"?** By default, years with |z-score| > 2 are
+flagged as extreme. This corresponds to roughly the most unusual 5% of years
+(2.5% early + 2.5% late).
+
+### Summary of Anomalies
+
+```{r anomalies-summary}
+summary(anomalies)
+```
+
+### Visualizing Anomalies
+
+The `plot()` method shows anomalies over time, coloured by direction (early vs.
+late), with extreme events marked:
+
+```{r anomalies-plot, fig.width=7, fig.height=5}
+plot(anomalies)
+```
+
+A histogram of anomaly magnitudes is available with
+`plot(anomalies, which = "histogram")`.
+
+### Robust vs. Classical Methods
+
+Phenological data often contains outliers - observations that are clearly
+erroneous or affected by unusual local conditions. The anomaly function offers
+two approaches.
+
+The **robust method** (`robust = TRUE`, default and recommended) uses the median as the baseline and the MAD (median absolute deviation) for standardization. This approach is less affected by outliers and should be preferred in most situations.
+
+The **classical method** (`robust = FALSE`) uses the mean as the baseline and the standard deviation (SD) for standardization. This approach is more affected by outliers.
+
+**When to use each:**
+
+- **Robust (default)**: Almost always. Phenological data commonly has outliers.
+- **Classical**: Only if you've already cleaned outliers, or for comparison
+  with older literature that used classical methods.
+
+## Part 3: Data Quality Assessment
+
+### Why Quality Matters
+
+Before running any analysis, you should understand your data's quality.
+Poor quality data can lead to:
+
+- **False trends**: A few erroneous observations can create apparent shifts
+- **Inflated variability**: Outliers increase standard deviations
+- **Spatial bias**: If quality varies by region, comparisons are compromised
+
+### Quality Dimensions
+
+The `pep_quality()` function assesses three dimensions:
+
+| Dimension | Question | Metric |
+|-----------|----------|--------|
+| **Completeness** | How many years have data? | % of period covered |
+| **Continuity** | Are there gaps? | Maximum consecutive missing years |
+| **Consistency** | Are there outliers? | % of observations flagged |
+
+### Running Quality Assessment
+
+```{r quality-basic}
+# Assess quality at the station level
+quality <- pep_quality(
+  pep = apple,
+  by = c("s_id", "phase_id")
+)
+
+print(quality)
+```
+
+### Understanding Quality Grades
+
+The function assigns letter grades based on thresholds:
+
+| Grade | Completeness | Max Gap | Outliers | Interpretation |
+|-------|--------------|---------|----------|----------------|
+| **A** | ≥ 80% | ≤ 2 years | < 2% | Excellent - use confidently |
+| **B** | ≥ 60% | ≤ 5 years | < 5% | Good - suitable for most analyses |
+| **C** | ≥ 40% | ≤ 10 years | < 10% | Fair - use with caution |
+| **D** | Below C | - | - | Poor - consider excluding |
+
+**What grade do you need?**
+
+- **Trend analysis**: Grade A or B recommended (need continuous data)
+- **Normal calculation**: Grade B or C acceptable (gaps less critical)
+- **Spatial analysis**: Grade C may suffice (using many stations)
+
+```{r quality-summary}
+# Summary of quality across all stations
+summary(quality)
+```
+
+### Visualizing Quality Assessment
+
+With many stations to assess, visual inspection is essential. The `plot()` method
+provides an overview of quality metrics:
+
+```{r quality-plot, fig.height=5, fig.width=11}
+# Overview plot: grade distribution + station map (requires pep for coordinates)
+plot(quality, pep = apple)
+```
+
+**Reading the plot:**
+
+- **Left panel**: Grade distribution shows how many stations fall into each category
+- **Right panel**: Map shows station locations colored by their quality grade,
+  revealing spatial patterns in data quality
+
+You can also generate individual plots:
+
+```{r quality-plot-grades, fig.height=4}
+# Just the grade distribution (no pep data needed)
+plot(quality, which = "grades")
+```
+
+```{r quality-plot-map, fig.height=5}
+# Just the map of station quality
+plot(quality, which = "map", pep = apple)
+```
+
+### Filtering Data by Quality
+
+A critical step before analysis is filtering to high-quality data:
+
+```{r quality-filter}
+# Get high-quality stations
+high_quality <- quality[quality_grade %in% c("A", "B")]
+
+cat("Quality distribution:\n")
+print(table(quality$quality_grade))
+
+cat("\nHigh quality (A or B):", nrow(high_quality), "of", nrow(quality),
+    "(", round(100 * nrow(high_quality) / nrow(quality), 1), "%)\n")
+
+# Filter original data to these stations
+if (nrow(high_quality) > 0) {
+  good_stations <- unique(high_quality$s_id)
+  apple_hq <- apple[s_id %in% good_stations]
+
+  cat("\nOriginal apple observations:", nrow(apple), "\n")
+  cat("After quality filter:", nrow(apple_hq),
+      "(", round(100 * nrow(apple_hq) / nrow(apple), 1), "%)\n")
+}
+```
+
+### Assessing Quality at Different Levels
+
+You can assess quality at various aggregation levels:
+
+```{r quality-country}
+# Country-level quality (coarser assessment)
+country_quality <- pep_quality(
+  pep = pep,
+  by = c("country", "species", "phase_id")
+)
+
+print(country_quality)
+```
+
+## Part 4: Complete Analytical Workflow
+
+Now let's put it all together in a realistic workflow:
+
+```{r workflow}
+cat("=== STEP 1: Data Quality Assessment ===\n\n")
+
+# Assess quality
+quality <- pep_quality(apple, by = c("s_id", "phase_id"))
+cat("Quality grades:\n")
+print(table(quality$quality_grade))
+
+cat("\n=== STEP 2: Filter to Good Quality Data ===\n\n")
+
+# Keep grades A, B, and C (exclude only grade D)
+good_stations <- quality[quality_grade %in% c("A", "B", "C"), s_id]
+apple_clean <- apple[s_id %in% good_stations]
+
+cat("Original observations:", nrow(apple), "\n")
+cat("After quality filter:", nrow(apple_clean), "\n")
+cat("Retained:", round(100 * nrow(apple_clean) / nrow(apple), 1), "%\n")
+
+stopifnot(nrow(apple_clean) > 0)
+
+cat("\n=== STEP 3: Calculate Baseline Normals ===\n\n")
+
+normals <- pheno_normals(
+  apple_clean,
+  period = 1990:2010,
+  by = c("country", "phase_id"),
+  min_years = 5
+)
+
+cat("Normals calculated for", sum(!is.na(normals$mean_doy)), "groups\n")
+cat("Mean DOY range:", round(min(normals$mean_doy, na.rm = TRUE), 0),
+    "to", round(max(normals$mean_doy, na.rm = TRUE), 0), "\n")
+
+cat("\n=== STEP 4: Calculate Anomalies ===\n\n")
+
+anomalies <- pheno_anomaly(
+  apple_clean,
+  baseline_period = 1990:2010,
+  by = c("country", "phase_id"),
+  min_years = 5
+)
+
+# Convert to plain data.table so grouped aggregation works correctly
+# (the pheno_anomaly S3 class can interfere with [.data.table dispatch)
+anomalies_dt <- as.data.table(anomalies)
+
+cat("Anomalies calculated for", sum(!is.na(anomalies_dt$anomaly_days)), "year-groups\n")
+cat("Extreme years:", sum(anomalies_dt$is_extreme, na.rm = TRUE), "\n")
+
+cat("\n=== STEP 5: Analyze Trends by Decade ===\n\n")
+
+decade_summary <- anomalies_dt[
+  !is.na(anomaly_days),
+  .(
+    mean_anomaly = round(mean(anomaly_days, na.rm = TRUE), 1),
+    sd_anomaly = round(sd(anomaly_days, na.rm = TRUE), 1),
+    n_obs = .N,
+    pct_extreme = round(100 * sum(is_extreme, na.rm = TRUE) / .N, 1)
+  ),
+  by = .(decade = floor(year / 10) * 10)
+][order(decade)]
+
+print(decade_summary)
+
+cat("\nInterpretation:\n")
+first_decade <- decade_summary$mean_anomaly[1]
+last_decade <- decade_summary$mean_anomaly[nrow(decade_summary)]
+change <- last_decade - first_decade
+
+if (change < -3) {
+  cat("- Strong shift toward EARLIER phenology\n")
+} else if (change < 0) {
+  cat("- Moderate shift toward earlier phenology\n")
+} else if (change > 3) {
+  cat("- Strong shift toward LATER phenology\n")
+} else {
+  cat("- No clear directional change\n")
+}
+```
+
+## Part 5: Visualizing Trends
+
+### Time Series Plots
+
+The `pheno_plot_timeseries()` function creates publication-ready time series:
+
+```{r timeseries-basic, fig.height=5}
+# Prepare aggregated data for visualization
+apple_annual <- apple[, .(
+  day = mean(day, na.rm = TRUE),
+  n = .N
+), by = .(year, species, phase_id)]
+
+# Add human-readable phase labels
+apple_annual[, phase := factor(phase_id,
+  levels = c(60, 65, 100),
+  labels = c("First flowers", "Full flowering", "Harvest"))]
+
+# Remove rows where phase mapping failed
+apple_annual <- apple_annual[!is.na(phase)]
+
+# Plot time series with trend lines
+if (nrow(apple_annual) > 0) {
+  pheno_plot_timeseries(
+    apple_annual,
+    color_by = "phase",
+    smooth = TRUE,
+    title = "Apple Phenology Trends"
+  )
+}
+```
+
+**Reading the plot:**
+
+- Each line represents a phenological phase
+- The smoothed line shows the underlying trend
+- Downward trends indicate earlier phenology
+- The spread around the line shows year-to-year variability
+
+### Detecting Trend Turning Points
+
+Sometimes trends aren't linear - they may accelerate, slow, or even reverse.
+The `pheno_trend_turning()` function uses the sequential Mann-Kendall test to
+detect such changes:
+
+```{r trends-turning, fig.height=5}
+# Get apple flowering data
+apple_flowering <- pep[species == "Malus domestica" & phase_id == 60]
+
+# Detect turning points
+turning <- pheno_trend_turning(apple_flowering, min_years = 10)
+print(turning)
+
+# Visualize the analysis
+plot(turning)
+```
+
+**Understanding the plot:**
+
+- **Blue line (Progressive tau)**: Trend calculated from the start forward
+- **Orange line (Retrograde tau)**: Trend calculated from the end backward
+- **Crossing points**: Where trends may have changed direction
+- **Dashed lines**: Statistical significance thresholds (±1.96 for 95%, ±2.58 for 99%)
+
+### Simple Trend Statistics
+
+For a single trend value, use `kendall_tau()`:
+
+```{r kendall-simple}
+# Aggregate to annual means
+annual_doy <- apple_flowering[, .(
+  mean_doy = mean(day, na.rm = TRUE)
+), by = year][order(year)]
+
+# Calculate Mann-Kendall test statistic
+# Note: kendall_tau() returns the standardized z-statistic, not Kendall's
+# tau correlation. Values beyond ±1.96 indicate significant trends.
+tau <- kendall_tau(annual_doy$mean_doy)
+
+cat("Mann-Kendall z-statistic:", round(tau, 3), "\n")
+cat("\nInterpretation:\n")
+if (tau < -2.58) {
+  cat("- Highly significant earlier trend (p < 0.01)\n")
+} else if (tau < -1.96) {
+  cat("- Significant earlier trend (p < 0.05)\n")
+} else if (tau > 2.58) {
+  cat("- Highly significant later trend (p < 0.01)\n")
+} else if (tau > 1.96) {
+  cat("- Significant later trend (p < 0.05)\n")
+} else {
+  cat("- No statistically significant trend\n")
+}
+```
+
+**Why Kendall's tau?**
+
+- Non-parametric (doesn't assume normality)
+- Robust to outliers
+- Works well with ordinal data
+- Widely used in phenological research
+
+### Linking Phenology to Climate
+
+A central goal of phenological research is to understand how climate drives
+the timing of biological events. The `pheno_regional()` function compiles
+multi-station phenological data into regional time series and links them to
+global temperature anomalies, enabling you to assess **climate sensitivity** -
+how many days earlier (or later) phenology occurs per degree of warming.
+
+```{r regional-climate, eval=FALSE}
+# Compile regional data and link to temperature anomalies
+regional_data <- pheno_regional(
+  pep = pep,
+  species_name = "Malus domestica",
+  year_min = 1961
+)
+
+# Visualize phenology alongside temperature anomalies
+pheno_plot(regional_data)
+```
+
+**What the output shows:**
+
+- **Regional median DOY** per year, aggregated from individual stations
+- **Global temperature anomaly** for context (GISS dataset)
+- **Correlation** between phenological timing and temperature
+
+**Typical climate sensitivities** for European spring phenology:
+
+| Phase | Sensitivity | Meaning |
+|-------|-------------|---------|
+| Leaf unfolding | -2 to -4 days/°C | Moderate response to spring warming |
+| Flowering | -3 to -5 days/°C | Strong response, especially for fruit trees |
+| Harvest | -1 to -3 days/°C | Weaker response, partly compensated by summer processes |
+
+These values mean that for every 1°C increase in spring temperature, flowering
+tends to occur 3-5 days earlier. Over the past 50 years, this has translated
+to an advance of roughly 2-5 days per decade across Central Europe.
+
+## Best Practices Summary
+
+### Before Analysis
+
+1. **Check data quality** with `pep_quality()` - always!
+2. **Filter to appropriate quality grades** - usually A, B, or C
+3. **Verify sample sizes** - are there enough years/stations?
+
+### Calculating Normals
+
+4. **Choose reference period carefully** - it affects your conclusions
+5. **Use median_doy** for robust central tendency
+6. **Set appropriate min_years** - WMO recommends 30, but 10-20 often works
+
+### Calculating Anomalies
+
+7. **Use robust method** (default) - handles outliers automatically
+8. **Consider z-scores** for cross-region/phase comparisons
+9. **Check for extreme years** - investigate them!
+
+### Analyzing Trends
+
+10. **Use non-parametric methods** like Kendall's tau
+11. **Look for trend changes** with `pheno_trend_turning()`
+12. **Consider multiple phases** - they may show different patterns
+
+### Reporting
+
+13. **Document your methods** - period, thresholds, filters
+14. **Report sample sizes** - readers need to assess reliability
+15. **Include uncertainty** - confidence intervals or standard errors
+
+## Next Steps
+
+You now understand the core analytical functions. Continue to:
+
+- **Spatial Phenological Patterns**: How does phenology vary with elevation
+  and latitude? Use `pheno_gradient()` and `pheno_synchrony()`.
+
+```{r eval = FALSE}
+vignette("spatial-patterns", package = "pep725")
+```
+
+- **Data Quality Assessment**: How to detect outliers and validate data completeness.
+
+```{r eval = FALSE}
+vignette("data-quality", package = "pep725")
+```
+
+## Session Info
+
+```{r session}
+sessionInfo()
+```
