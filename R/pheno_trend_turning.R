@@ -211,72 +211,97 @@ pheno_trend_turning <- function(pep,
 }
 
 
-#' Sequential Mann-Kendall Test (Internal)
+#' Sequential Mann-Kendall Test (Sneyers 1975, internal)
 #'
-#' Computes progressive and retrograde normalized Kendall tau series
-#' and identifies potential trend turning points.
+#' Computes the Sneyers (1975) progressive and retrograde standardised
+#' rank-count statistics \eqn{u(t)} and \eqn{u'(t)} for a time series, and
+#' identifies potential trend turning points as intersections of the two
+#' curves inside the non-significance band.
 #'
-#' @param x Numeric vector (time series)
-#' @return List with progressive, retrograde, and turning_points
+#' Let \eqn{n_i} denote the number of \eqn{j < i} with \eqn{x_i > x_j},
+#' and \eqn{t_i = \sum_{k=1}^{i} n_k}. Under the null hypothesis of no
+#' trend, \eqn{E[t_i] = i(i-1)/4} and \eqn{\mathrm{Var}[t_i] = i(i-1)(2i+5)/72}.
+#' The progressive statistic is
+#' \eqn{u(t_i) = (t_i - E[t_i])/\sqrt{\mathrm{Var}[t_i]}}.
+#' The retrograde \eqn{u'(t)} is the same procedure applied to the
+#' reversed series, then reversed and negated so both curves fluctuate
+#' around zero under stationarity.
+#'
+#' A turning point is flagged where the sign of \eqn{u - u'} changes
+#' between two consecutive indices and both curves are within the 95\%
+#' non-significance band \eqn{|z| < 1.96} at the crossing.
+#'
+#' Previous versions of this function (pep725 <= 1.0.2) used
+#' \eqn{\mathrm{Var} = i(i-1)(2i+5)/18} with a per-index (non-cumulative)
+#' \eqn{S} statistic and an ad-hoc \eqn{|u| > 0.5} threshold for the
+#' turning-point filter. That formulation did not match Sneyers' procedure.
+#'
+#' @param x Numeric vector (time series assumed to be equidistant;
+#'   callers should drop or impute NAs beforehand).
+#' @return List with \code{progressive}, \code{retrograde} (both length
+#'   \code{length(x)}), and \code{turning_points} (logical).
+#' @references
+#' Sneyers, R. (1975). Sur l'analyse statistique des séries d'observations.
+#' WMO Technical Note No. 143, WMO No. 415. Geneva: WMO.
+#'
+#' Moraes, J. M. et al. (1998). Trends in hydrological parameters of a
+#' Southern Brazilian watershed. \emph{Ambio} 27:302-307.
 #' @keywords internal
 sequential_mk <- function(x) {
   n <- length(x)
   if (n < 4) {
     return(list(
       progressive = rep(NA_real_, n),
-      retrograde = rep(NA_real_, n),
+      retrograde  = rep(NA_real_, n),
       turning_points = rep(FALSE, n)
     ))
   }
 
-  # Compute progressive series (forward)
-  prog <- numeric(n)
-  for (i in 2:n) {
-    s <- 0
-    for (j in 1:(i - 1)) {
-      s <- s + sign(x[i] - x[j])
+  # Rank-count helper: n_i = number of j < i with x_i > x_j.
+  rank_counts <- function(v) {
+    m <- length(v)
+    out <- integer(m)
+    for (i in seq_len(m)) {
+      if (i == 1L) next
+      out[i] <- sum(v[i] > v[seq_len(i - 1L)])
     }
-    # Normalize: E[S] = 0, Var[S] = i*(i-1)*(2i+5)/18
-    var_s <- i * (i - 1) * (2 * i + 5) / 18
-    prog[i] <- s / sqrt(var_s)
+    out
   }
-  prog[1] <- 0
 
-  # Compute retrograde series (backward on reversed series)
-  x_rev <- rev(x)
-  retr_rev <- numeric(n)
-  for (i in 2:n) {
-    s <- 0
-    for (j in 1:(i - 1)) {
-      s <- s + sign(x_rev[i] - x_rev[j])
-    }
-    var_s <- i * (i - 1) * (2 * i + 5) / 18
-    retr_rev[i] <- s / sqrt(var_s)
-  }
+  i_seq <- seq_len(n)
+  E_t <- i_seq * (i_seq - 1) / 4
+  V_t <- i_seq * (i_seq - 1) * (2 * i_seq + 5) / 72
+
+  # Progressive series
+  t_prog <- cumsum(rank_counts(x))
+  prog <- (t_prog - E_t) / sqrt(V_t)
+  prog[1] <- 0  # Var is zero at i = 1; by convention the curve starts at 0
+
+  # Retrograde: compute u on the reversed series, then reverse the
+  # resulting curve (no negation). Under H0 both u and u' fluctuate
+  # around zero; under a monotone trend they diverge in opposite
+  # directions and do not cross; at a trend change point (transition
+  # from stationary to trending, or vice versa) they intersect inside
+  # the 95% confidence band.
+  t_retr_rev <- cumsum(rank_counts(rev(x)))
+  retr_rev <- (t_retr_rev - E_t) / sqrt(V_t)
   retr_rev[1] <- 0
-  # Reverse back and negate (retrograde should be negative of reversed progressive)
-  retr <- -rev(retr_rev)
+  retr <- rev(retr_rev)
 
-  # Find turning points (where lines cross)
+  # Turning points: u and u' cross inside the 95% non-significance band.
   turning <- rep(FALSE, n)
+  diff_pr <- prog - retr
   for (i in 2:(n - 1)) {
-    # Check for sign change in the difference
-    diff_prev <- prog[i - 1] - retr[i - 1]
-    diff_curr <- prog[i] - retr[i]
-    diff_next <- prog[i + 1] - retr[i + 1]
-
-    # Crossing occurs when sign changes
-    if ((diff_prev * diff_curr <= 0) || (diff_curr * diff_next <= 0)) {
-      # Additional check: both series should be non-trivial
-      if (abs(prog[i]) > 0.5 || abs(retr[i]) > 0.5) {
-        turning[i] <- TRUE
-      }
+    if (!is.finite(diff_pr[i]) || !is.finite(diff_pr[i + 1])) next
+    if (diff_pr[i] * diff_pr[i + 1] <= 0 &&
+        abs(prog[i]) < 1.96 && abs(retr[i]) < 1.96) {
+      turning[i] <- TRUE
     }
   }
 
   list(
     progressive = prog,
-    retrograde = retr,
+    retrograde  = retr,
     turning_points = turning
   )
 }
@@ -284,28 +309,49 @@ sequential_mk <- function(x) {
 
 #' Mann-Kendall Z-Statistic
 #'
-#' Computes the Mann-Kendall Z-statistic for a time series,
-#' providing a non-parametric test of monotonic trend. The Z-statistic
-#' is approximately standard normal under the no-trend null hypothesis.
+#' Computes the Mann-Kendall Z-statistic for a time series, a non-parametric
+#' test of monotonic trend. The Z-statistic is approximately standard normal
+#' under the no-trend null hypothesis.
+#'
+#' The implementation uses the standard tie correction for \code{Var(S)} (so
+#' that tied observations do not inflate the test) and the continuity
+#' correction \code{Z = (S - sign(S))/sqrt(Var(S))}, matching
+#' \code{Kendall::MannKendall()}.
 #'
 #' @param x Numeric vector (time series assumed to be equidistant).
 #'   \code{NA} values are silently removed.
 #'
-#' @return Numeric. The Mann-Kendall Z-statistic (\code{S / sqrt(Var(S))}).
-#'   Positive values indicate increasing trend, negative values decreasing.
-#'   Compare against standard normal quantiles (e.g., |Z| > 1.96 for p < 0.05).
-#'   Returns \code{NA} if fewer than 3 non-missing values.
+#' @return Numeric. The Mann-Kendall Z-statistic. Positive values indicate an
+#'   increasing trend, negative values decreasing. Compare against standard
+#'   normal quantiles (e.g., \code{|Z| > 1.96} for \code{p < 0.05}).
+#'   Returns \code{NA} if fewer than three non-missing values.
+#'
+#' @section Note on \code{kendall_tau()}:
+#' Earlier versions of pep725 exported a function called \code{kendall_tau()}
+#' that actually returned this Mann-Kendall Z-statistic (not the true
+#' Kendall's \eqn{\tau} = \eqn{S / (n(n-1)/2)}). \code{kendall_tau()} is now
+#' a deprecated alias of \code{mann_kendall_z()}; please update callers.
+#'
+#' @references
+#' Mann, H.B. (1945). Nonparametric tests against trend. \emph{Econometrica}
+#' 13, 245-259.
+#'
+#' Kendall, M.G. (1975). \emph{Rank Correlation Methods}. 4th ed. London:
+#' Charles Griffin.
 #'
 #' @examples
 #' # Decreasing trend (earlier phenology)
-#' kendall_tau(c(120, 118, 115, 112, 110, 108, 105))
+#' mann_kendall_z(c(120, 118, 115, 112, 110, 108, 105))
 #'
 #' # No clear trend
-#' kendall_tau(c(120, 115, 122, 118, 121, 116, 119))
+#' mann_kendall_z(c(120, 115, 122, 118, 121, 116, 119))
 #'
+#' @seealso \code{\link{kendall_tau}} (deprecated alias);
+#'   \code{\link{pheno_trend_turning}} for a full sequential Mann-Kendall
+#'   analysis.
 #' @author Matthias Templ
 #' @export
-kendall_tau <- function(x) {
+mann_kendall_z <- function(x) {
   x <- x[!is.na(x)]
   n <- length(x)
 
@@ -313,21 +359,66 @@ kendall_tau <- function(x) {
     return(NA_real_)
   }
 
-  # Calculate Kendall's S
-  s <- 0
-  for (i in 1:(n - 1)) {
-    for (j in (i + 1):n) {
-      s <- s + sign(x[j] - x[i])
-    }
+  # Vectorised S = sum over i<j of sign(x_j - x_i).
+  #   outer(x, x, "-")[i, j] = x[i] - x[j]
+  # The *lower* triangle holds entries with i > j, i.e. sign(x[i] - x[j])
+  # for i > j, which after re-labelling is the same multiset of pairs we
+  # want (sign(x[j] - x[i]) for i < j).
+  d <- outer(x, x, "-")
+  s <- sum(sign(d[lower.tri(d)]))
+
+  # Tie correction: if ties are present, reduce Var(S) by
+  #   sum over tie groups g of t_g (t_g - 1) (2 t_g + 5) / 18.
+  tie_counts <- tabulate(match(x, unique(x)))
+  tie_counts <- tie_counts[tie_counts > 1]
+  tie_term <- sum(tie_counts * (tie_counts - 1) * (2 * tie_counts + 5)) / 18
+
+  var_s <- (n * (n - 1) * (2 * n + 5) - tie_term * 18) / 18
+
+  # Continuity correction: subtract/add 1 from S before standardising.
+  if (s > 0) {
+    z <- (s - 1) / sqrt(var_s)
+  } else if (s < 0) {
+    z <- (s + 1) / sqrt(var_s)
+  } else {
+    z <- 0
   }
 
-  # Variance under null hypothesis
-  var_s <- n * (n - 1) * (2 * n + 5) / 18
+  z
+}
 
-  # Normalized tau
-  tau <- s / sqrt(var_s)
 
-  tau
+#' Mann-Kendall Z-Statistic (deprecated alias for \code{mann_kendall_z})
+#'
+#' This function was misnamed in pep725 <= 1.0.2: it returned the
+#' Mann-Kendall Z-statistic, not Kendall's \eqn{\tau = S / (n(n-1)/2)}.
+#' Please call \code{\link{mann_kendall_z}} instead for identical (and
+#' better: tie-corrected, continuity-corrected) behaviour.
+#'
+#' Note that this function is now a thin wrapper and will continue to
+#' return the Z-statistic until a future major release.
+#'
+#' @param x Numeric vector (time series assumed to be equidistant).
+#'   \code{NA} values are silently removed.
+#' @return Numeric. Identical output shape to \code{mann_kendall_z()}.
+#'
+#' @examples
+#' suppressWarnings(kendall_tau(c(120, 118, 115, 112, 110, 108, 105)))
+#'
+#' @seealso \code{\link{mann_kendall_z}}
+#' @author Matthias Templ
+#' @export
+kendall_tau <- function(x) {
+  .Deprecated(
+    new = "mann_kendall_z",
+    package = "pep725",
+    msg = paste(
+      "kendall_tau() is deprecated because it is misnamed: it returns the",
+      "Mann-Kendall Z-statistic, not Kendall's tau. Use mann_kendall_z()",
+      "for identical (and improved: tie-corrected) behaviour."
+    )
+  )
+  mann_kendall_z(x)
 }
 
 

@@ -41,6 +41,25 @@ print(outliers)
 # # Z-score method: flag if |z| > 3 (assumes normal distribution)
 # outliers_zscore <- pep_flag_outliers(flowering, method = "zscore", threshold = 3)
 
+## ----gam-method, eval=FALSE---------------------------------------------------
+# # Model-based detection across the whole species x phase group.
+# outliers_gam <- pep_flag_outliers(
+#   apple_flowering,
+#   by = c("genus", "species", "phase_id"),
+#   method = "gam_residual",
+#   threshold = 3.5
+# )
+
+## ----mahalanobis-method, eval=FALSE-------------------------------------------
+# # Multivariate detection on the phase profile per station-year.
+# # by = c("genus", "species") pools across phases so the covariance
+# # is estimated from the joint (BBCH 60, BBCH 65, BBCH 89) distribution.
+# outliers_mahal <- pep_flag_outliers(
+#   apple,
+#   by = c("genus", "species"),
+#   method = "mahalanobis"
+# )
+
 ## ----flag-summary-------------------------------------------------------------
 summary(outliers)
 
@@ -77,6 +96,28 @@ pep_plot_outliers(outliers, type = "detail", n_top = 15)
 ## ----plot-map, fig.height=5---------------------------------------------------
 # Where are outliers located?
 pep_plot_outliers(outliers, type = "map")
+
+## ----plot-diagnostic-gam, eval=FALSE------------------------------------------
+# # For gam_residual: classical model diagnostics
+# outliers_gam <- pep_flag_outliers(
+#   apple_flowering,
+#   by = c("genus", "species", "phase_id"),
+#   method = "gam_residual"
+# )
+# pep_plot_outliers(outliers_gam, type = "diagnostic")
+
+## ----plot-diagnostic-mahal, eval=FALSE----------------------------------------
+# # For mahalanobis: MD-specific diagnostics
+# outliers_mahal <- pep_flag_outliers(
+#   apple,
+#   by = c("genus", "species"),
+#   method = "mahalanobis"
+# )
+# pep_plot_outliers(outliers_mahal, type = "diagnostic")
+
+## ----plot-profile, eval=FALSE-------------------------------------------------
+# # Phase-profile parallel coordinates (primary Mahalanobis figure).
+# pep_plot_outliers(outliers_mahal, type = "profile")
 
 ## ----completeness-basic-------------------------------------------------------
 # Check completeness by station and phase

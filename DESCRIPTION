@@ -1,6 +1,6 @@
 Package: pep725
 Title: Pan-European Phenological Data Analysis
-Version: 1.0.2
+Version: 1.1.0
 Authors@R: 
     c(person("Matthias", "Templ", , "matthias.templ@gmail.com", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-8638-5276")),
@@ -28,18 +28,19 @@ LazyData: true
 Depends: R (>= 4.1), data.table, ggplot2
 Imports: dplyr, mgcv, methods, patchwork, purrr, robustbase, stats,
         tibble, tidyr, tidyselect, utils, rnaturalearth, sf
-Suggests: ggmap, knitr, leaflet, miniUI, nlme, quantreg, rmarkdown,
-        rnaturalearthdata, pls, shiny, sp, testthat (>= 3.0.0)
+Suggests: ggmap, Kendall, knitr, leaflet, miniUI, nlme, quantreg,
+        rmarkdown, rnaturalearthdata, pls, shiny, sp, testthat (>=
+        3.0.0)
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 RoxygenNote: 7.3.3
 BugReports: https://github.com/matthias-da/pep725/issues
 URL: https://github.com/matthias-da/pep725
 NeedsCompilation: no
-Packaged: 2026-03-31 09:57:03 UTC; matthias
+Packaged: 2026-04-23 12:11:16 UTC; matthias
 Author: Matthias Templ [aut, cre] (ORCID:
     <https://orcid.org/0000-0002-8638-5276>),
   Barbara Templ [aut] (ORCID: <https://orcid.org/0000-0002-9391-5888>)
 Maintainer: Matthias Templ <matthias.templ@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-03-31 10:50:02 UTC
+Date/Publication: 2026-04-24 11:00:02 UTC
